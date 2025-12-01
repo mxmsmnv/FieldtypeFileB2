@@ -27,7 +27,7 @@ class InputfieldFileB2 extends InputfieldFile implements Module {
 			'title' => __('InputfieldFileB2', __FILE__),
 			'summary' => __('One or more file uploads to Backblaze B2 (sortable)', __FILE__),
 			'author' => 'Maxim Alex',
-			'version' => 8,
+			'version' => 9,
 			'autoload' => true
 		);
 	}
@@ -47,6 +47,17 @@ class InputfieldFileB2 extends InputfieldFile implements Module {
 		
 		// Add hook to delete local files after page save (only if not using localStorage)
 		$this->addHookAfter('Pages::saved', $this, 'hookPageSaved');
+	}
+	
+	public function renderReady(Inputfield $parent = null, $renderValueMode = false) {
+		$modules = $this->wire('modules');
+		
+		$inputfieldFile = $modules->get('InputfieldFile');
+		if($inputfieldFile) {
+			$inputfieldFile->renderReady();
+		}
+		
+		return parent::renderReady($parent, $renderValueMode);
 	}
 
 	/**
