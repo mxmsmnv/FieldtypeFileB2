@@ -1,0 +1,52 @@
+/**
+ * InputfieldFileB2 CSS
+ * 
+ * Minimal styling with drag-and-drop sorting support
+ */
+
+/* Optional: Visual indicator for B2 files */
+.InputfieldFileB2 .InputfieldFileName[href*="backblazeb2.com"]::before {
+	content: "☁️ ";
+	opacity: 0.6;
+	margin-right: 3px;
+}
+
+/* Drag handle styling - ALWAYS visible */
+.InputfieldFileB2 .InputfieldFileDrag {
+	color: #999;
+	margin-right: 8px;
+	cursor: move !important;
+	opacity: 0.5;
+	transition: opacity 0.2s;
+}
+
+.InputfieldFileB2 .InputfieldFileDrag:hover {
+	opacity: 1;
+	color: #666;
+}
+
+/* Make entire file row draggable */
+.InputfieldFileB2 .InputfieldFileList > li {
+	cursor: move !important;
+	transition: opacity 0.2s, background 0.2s;
+}
+
+.InputfieldFileB2 .InputfieldFileList > li:hover {
+	opacity: 0.95;
+}
+
+/* Highlight during drag */
+.InputfieldFileB2 .InputfieldFileList > li.ui-sortable-helper {
+	background: #f0f0f0 !important;
+	box-shadow: 0 3px 10px rgba(0,0,0,0.2) !important;
+	opacity: 0.9 !important;
+	z-index: 9999 !important;
+}
+
+/* Placeholder during drag */
+.InputfieldFileB2 .InputfieldFileList > li.ui-sortable-placeholder {
+	background: #e3f2fd !important;
+	border: 2px dashed #2196F3 !important;
+	height: 50px !important;
+	visibility: visible !important;
+}
