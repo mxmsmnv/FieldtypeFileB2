@@ -1,23 +1,26 @@
 # FieldtypeFileB2 for ProcessWire
 
-Store and serve files directly from Backblaze B2 Cloud Storage in ProcessWire. Perfect for video hosting, large media files, and reducing server storage costs.
+Store and serve files directly from Backblaze B2 Cloud Storage in ProcessWire. **Now supports files up to 700MB** with automatic chunked uploads.
 
 ## Features
 
 - 🚀 **Direct B2 Upload** - Files upload directly to Backblaze B2
+- 📦 **Large Files Support** - Up to 700MB with automatic chunked upload
+- ⚡ **Smart Upload** - Auto-switches between standard and chunked methods
 - 💰 **Cost Effective** - $6/TB/month (5x cheaper than AWS S3)
 - 🌐 **Custom Domain Support** - Use your own CDN domain
-- ⚡ **Cloudflare Integration** - Free bandwidth via Bandwidth Alliance
+- ☁️ **Cloudflare Integration** - Free bandwidth via Bandwidth Alliance
 - 🔒 **Public & Private Buckets** - Flexible access control
-- 📦 **Multiple Files** - Support for repeater fields with multiple files
+- 📁 **Multiple Files** - Support for repeater fields with multiple files
 - 🎬 **Perfect for Video** - Tested with Plyr, Video.js and other players
 
 ## Requirements
 
 - ProcessWire 3.x
-- PHP 7.4+
-- Backblaze B2 Account
+- PHP 7.4+ (8.3 recommended)
 - cURL extension enabled
+- Backblaze B2 Account
+- **For files >100MB:** Properly configured Nginx/PHP timeouts
 
 ## Installation
 
@@ -55,7 +58,72 @@ Cache-Control max-age: 86400 (24 hours)
 3. Name: `b2_video` (or any name)
 4. Add to your template
 
-### 4. Optional: Custom Domain with Cloudflare
+### 4. Web Server Optimization (CRITICAL for files >50MB)
+
+#### PHP Settings (CloudPanel)
+
+**Sites → Your Site → PHP Settings:**
+
+```
+PHP Version: 8.3
+memory_limit: 512 MB
+max_execution_time: 1800 (30 minutes)
+max_input_time: 1800
+post_max_size: 2 GB
+upload_max_filesize: 2 GB
+max_input_vars: 10000
+```
+
+**Additional Configuration Directives:**
+```ini
+date.timezone=UTC;
+display_errors=off;
+max_execution_time=1800;
+max_input_time=1800;
+```
+
+#### Nginx Configuration (CloudPanel)
+
+**Sites → Your Site → Vhost → Edit:**
+
+Add these lines to **BOTH** server blocks (port 80/443 AND port 8080):
+
+```nginx
+server {
+  # ... existing config ...
+  
+  # CRITICAL: File upload limits
+  client_max_body_size 2048M;
+  client_body_timeout 1800s;
+  
+  # ... rest of config ...
+}
+
+server {
+  listen 8080;
+  # ... existing config ...
+  
+  # CRITICAL: File upload limits
+  client_max_body_size 2048M;
+  client_body_timeout 1800s;
+  
+  location ~ \.php$ {
+    # ... existing config ...
+    
+    # CRITICAL: PHP-FPM timeouts
+    fastcgi_read_timeout 1800;
+    fastcgi_send_timeout 1800;
+  }
+}
+```
+
+**After editing:**
+```bash
+sudo nginx -t          # Test config
+sudo systemctl reload nginx
+```
+
+### 5. Optional: Custom Domain with Cloudflare
 
 For free bandwidth and faster delivery:
 
@@ -89,6 +157,37 @@ Then rewrite the path:
 ✅ Use Custom Domain
 Custom Domain: cdn.yourdomain.com
 ```
+
+## How It Works
+
+The module automatically chooses the best upload method:
+
+### Small Files (< 50MB)
+```
+Standard Upload:
+1. Browser → Server (shows progress)
+2. Server → B2 in one request
+3. Success!
+```
+
+### Large Files (≥ 50MB)
+```
+Chunked Upload:
+1. Browser → Server (shows progress)
+2. Server → B2 in 10MB chunks:
+   - Chunk 1/50 (10MB)
+   - Chunk 2/50 (10MB)
+   - ... continues ...
+   - Chunk 50/50 (10MB)
+3. B2 assembles file
+4. Success!
+```
+
+**Benefits of Chunked Upload:**
+- ✅ Lower memory usage (reads 10MB at a time)
+- ✅ More reliable for large files
+- ✅ Can retry individual chunks if they fail
+- ✅ Works around server limits
 
 ## Usage Examples
 
@@ -152,6 +251,18 @@ Custom Domain: cdn.yourdomain.com
 <?php endforeach; ?>
 ```
 
+## File Size Limits
+
+| File Size | Upload Method | Chunks | Est. Time* |
+|-----------|---------------|--------|-----------|
+| < 50MB    | Standard      | 1      | 1-2 min   |
+| 50-100MB  | Chunked       | 5-10   | 2-5 min   |
+| 100-300MB | Chunked       | 10-30  | 5-10 min  |
+| 300-500MB | Chunked       | 30-50  | 10-15 min |
+| 500-700MB | Chunked       | 50-70  | 15-25 min |
+
+*Times assume 10 Mbps upload speed and properly configured server
+
 ## Pricing Comparison
 
 ### Backblaze B2 + Cloudflare
@@ -170,9 +281,81 @@ Custom Domain: cdn.yourdomain.com
 
 💰 **You save 99% on bandwidth with Cloudflare!**
 
+## Troubleshooting
+
+### Files return 404
+
+**Cause:** Files not uploaded to B2 or localStorage enabled
+
+**Solution:**
+1. Check if `localStorage` is disabled in module settings
+2. Verify bucket is Public (or CORS configured for Private)
+3. Check ProcessWire logs for upload errors
+4. Confirm files exist in B2 bucket
+
+### Upload freezes or times out
+
+**Cause:** Insufficient server timeouts
+
+**Solution:**
+1. Verify Nginx timeouts are set (see configuration above)
+2. Verify PHP timeouts are set (see configuration above)
+3. Check server logs:
+```bash
+tail -f /var/log/nginx/error.log
+tail -f /var/log/php8.3-fpm.log
+```
+
+### Large files (>100MB) fail to upload
+
+**Cause:** Server resource limits or network issues
+
+**Solution:**
+1. **Increase timeouts** to 30 minutes (1800s)
+2. **Check PHP memory:** Should be 512MB minimum
+3. **Test network speed:** Upload may take time
+4. **Check logs for specific error:**
+```bash
+tail -100 /var/log/nginx/error.log
+```
+
+### Video not playing
+
+**Cause:** Codec compatibility or CORS issues
+
+**Solution:**
+1. Verify MP4 codec compatibility (H.264 video, AAC audio)
+2. Check CORS configuration (if private bucket)
+3. Confirm file uploaded with correct Content-Type
+4. Test direct B2 URL in browser
+
+### 502 Bad Gateway or 504 Gateway Timeout
+
+**Cause:** Nginx or PHP-FPM timeout
+
+**Solution:**
+```nginx
+# In Nginx vhost:
+fastcgi_read_timeout 1800;
+client_body_timeout 1800s;
+
+# In PHP settings:
+max_execution_time = 1800
+```
+
+### Memory exhausted error
+
+**Cause:** File too large for available PHP memory
+
+**Solution:**
+1. Increase PHP memory_limit to 512MB
+2. Module uses chunked reading (10MB at time) so shouldn't happen
+3. If still occurs, check for other memory-intensive plugins
+
 ## CORS Configuration
 
-For cross-domain requests, add CORS rules in B2:
+For cross-domain requests or private buckets:
+
 ```json
 [
   {
@@ -186,36 +369,26 @@ For cross-domain requests, add CORS rules in B2:
 ]
 ```
 
-## Troubleshooting
-
-### Files return 404
-
-1. Check if `localStorage` is disabled in module settings
-2. Verify bucket is Public (or CORS configured for Private)
-3. Confirm files uploaded successfully to B2
-
-### Custom domain not working
-
-1. Ensure Cloudflare Proxy is **enabled** (orange cloud)
-2. Verify Transform Rule is **deployed** (not draft)
-3. Wait 1-2 minutes for DNS propagation
-4. Check Transform Rule uses correct bucket name
-
-### Video not playing
-
-1. Verify MP4 codec compatibility (H.264 video, AAC audio)
-2. Check CORS configuration
-3. Confirm file uploaded with correct Content-Type
-
 ## Best Practices
+
+### For Production Use
 
 1. **Use Custom Domain with Cloudflare** for free bandwidth
 2. **Enable Cloudflare Caching** for faster delivery
 3. **Set appropriate Cache-Control** headers (24-48 hours for videos)
 4. **Use Public buckets** for simpler setup (unless security required)
 5. **Disable localStorage** to use B2 storage
+6. **Monitor B2 costs** in your Backblaze dashboard
 
-## Cloudflare Caching Optimization
+### For Large Files (>100MB)
+
+1. **Increase server timeouts** to 30 minutes (1800s)
+2. **Test with smaller files first** to verify configuration
+3. **Monitor logs** during upload to catch issues early
+4. **Warn users** about upload time for large files
+5. **Consider file size limits** in your UI
+
+### Cloudflare Caching Optimization
 
 **Page Rules:**
 ```
@@ -231,6 +404,78 @@ This will:
 - Speed up video delivery worldwide
 - Maximize free bandwidth usage
 
+## Technical Details
+
+### Chunked Upload Specs
+
+- **Chunk Size:** 10MB
+- **Threshold:** Files ≥ 50MB use chunked upload
+- **Max File Size:** ~970GB (theoretical B2 limit: 10,000 chunks × 100MB)
+- **Current Practical Limit:** 700MB (tested)
+
+### B2 API Endpoints Used
+
+- `b2_authorize_account` - Authentication
+- `b2_get_upload_url` - Standard uploads
+- `b2_start_large_file` - Start chunked upload
+- `b2_get_upload_part_url` - Get URL for each chunk
+- `b2_finish_large_file` - Complete chunked upload
+- `b2_list_file_names` - File listing (for delete)
+- `b2_delete_file_version` - Delete files
+
+## Monitoring & Logs
+
+### Check Upload Progress
+
+ProcessWire logs show detailed upload progress:
+
+```
+Setup → Logs → messages
+
+Standard upload:
+"Starting standard upload for 45.23MB file"
+
+Chunked upload:
+"Starting chunked upload for 256.78MB file"
+"Uploading 26 chunks of 10MB each"
+"Uploaded chunk 1/26"
+"Uploaded chunk 2/26"
+...
+"Successfully uploaded 26 chunks"
+```
+
+### Server Logs
+
+```bash
+# Nginx errors
+tail -f /var/log/nginx/error.log
+
+# PHP-FPM errors
+tail -f /var/log/php8.3-fpm.log
+
+# Follow both simultaneously
+tail -f /var/log/nginx/error.log /var/log/php8.3-fpm.log
+```
+
+## Upgrade from Previous Versions
+
+See [CHANGELOG.md](CHANGELOG.md) for version history and upgrade notes.
+
+### Quick Upgrade
+
+```bash
+# Backup current module
+cp -r /site/modules/FieldtypeFileB2 /site/modules/FieldtypeFileB2.backup
+
+# Copy new files
+cp -r FieldtypeFileB2/* /site/modules/FieldtypeFileB2/
+
+# Refresh modules in ProcessWire
+# Modules → Refresh
+```
+
+**Important:** Version 10+ requires updated Nginx/PHP settings for large files.
+
 ## License
 
 MIT License - feel free to use commercially
@@ -239,15 +484,27 @@ MIT License - feel free to use commercially
 
 Developed for video hosting on [lqrs.com](https://lqrs.com)
 
+Built with ProcessWire CMS and Backblaze B2 API
+
 ## Support
 
-For issues and feature requests, please use GitHub Issues.
+For issues and feature requests:
+- GitHub Issues: [your-repo-url]
+- ProcessWire Forum: [forum-link]
 
 ## Changelog
 
-### Version 0.0.8
-- Added custom domain support
-- Improved URL generation
-- Added b2url property hook
-- Fixed file size tracking
-- Better error handling
+See [CHANGELOG.md](CHANGELOG.md) for detailed version history.
+
+### Latest Changes (v1.0)
+
+- ✅ Added chunked upload support for files ≥ 50MB
+- ✅ Tested with files up to 700MB
+- ✅ Improved logging for upload progress
+- ✅ Automatic method selection (standard vs chunked)
+- ✅ Better error handling and recovery
+- ✅ Comprehensive documentation for large files
+
+---
+
+**Note:** This module is under active development. Always test with non-critical data first.

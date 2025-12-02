@@ -27,7 +27,7 @@ class InputfieldFileB2 extends InputfieldFile implements Module {
 			'title' => __('InputfieldFileB2', __FILE__),
 			'summary' => __('One or more file uploads to Backblaze B2 (sortable)', __FILE__),
 			'author' => 'Maxim Alex',
-			'version' => 9,
+			'version' => 10,
 			'autoload' => true
 		);
 	}
@@ -555,10 +555,9 @@ class InputfieldFileB2 extends InputfieldFile implements Module {
 	/**
 	 * Upload file to Backblaze B2
 	 * 
-	 * Process:
-	 * 1. Get upload URL and auth token
-	 * 2. Calculate SHA1 hash of file
-	 * 3. Upload file with metadata headers
+	 * Automatically chooses between:
+	 * - Standard upload for files < 50MB
+	 * - Large file (chunked) upload for files >= 50MB
 	 *
 	 * @param Pagefile $pagefile File to upload
 	 * @param int $pageID Page ID for organizing files
@@ -566,6 +565,24 @@ class InputfieldFileB2 extends InputfieldFile implements Module {
 	 * @throws WireException on upload failure
 	 */
 	protected function uploadFileToB2($pagefile, $pageID) {
+		$fileSize = filesize($pagefile->filename);
+		$fileSizeMB = round($fileSize / 1024 / 1024, 2);
+		
+		// Use chunked upload for files >= 50MB
+		if($fileSize >= 50 * 1024 * 1024) {
+			$this->message("Starting chunked upload for {$fileSizeMB}MB file", Notice::log);
+			return $this->uploadLargeFileToB2($pagefile, $pageID);
+		}
+		
+		// Standard upload for smaller files
+		$this->message("Starting standard upload for {$fileSizeMB}MB file", Notice::log);
+		return $this->uploadStandardFileToB2($pagefile, $pageID);
+	}
+	
+	/**
+	 * Standard B2 upload for files < 100MB
+	 */
+	protected function uploadStandardFileToB2($pagefile, $pageID) {
 		// Get upload URL and token
 		$uploadData = $this->getUploadUrl();
 		
@@ -601,7 +618,7 @@ class InputfieldFileB2 extends InputfieldFile implements Module {
 		curl_setopt($ch, CURLOPT_POST, true);
 		curl_setopt($ch, CURLOPT_POSTFIELDS, $fileContent);
 		curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-		curl_setopt($ch, CURLOPT_TIMEOUT, 300); // 5 minutes for large files
+		curl_setopt($ch, CURLOPT_TIMEOUT, 300);
 		
 		$response = curl_exec($ch);
 		$httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
@@ -625,6 +642,160 @@ class InputfieldFileB2 extends InputfieldFile implements Module {
 			throw new WireException($errorMsg);
 		}
 
+		return json_decode($response, true);
+	}
+	
+	/**
+	 * Large file (chunked) upload for files >= 50MB
+	 * Uses B2 Large File API with 10MB chunks
+	 */
+	protected function uploadLargeFileToB2($pagefile, $pageID) {
+		$this->authenticateB2();
+		
+		$fileName = "{$pageID}/{$pagefile->name}";
+		$fileSize = filesize($pagefile->filename);
+		$contentType = mime_content_type($pagefile->filename);
+		if(!$contentType) $contentType = 'application/octet-stream';
+		
+		// 1. Start large file upload
+		$ch = curl_init("{$this->apiUrl}/b2api/v2/b2_start_large_file");
+		curl_setopt($ch, CURLOPT_HTTPHEADER, array(
+			"Authorization: {$this->authToken}",
+			"Content-Type: application/json"
+		));
+		
+		$fileInfo = array();
+		if(!empty($this->cacheControl) && $this->cacheControl > 0) {
+			$fileInfo['b2-cache-control'] = "max-age={$this->cacheControl}";
+		}
+		
+		curl_setopt($ch, CURLOPT_POST, true);
+		curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode(array(
+			'bucketId' => $this->bucketId,
+			'fileName' => $fileName,
+			'contentType' => $contentType,
+			'fileInfo' => $fileInfo
+		)));
+		curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+		curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+		
+		$response = curl_exec($ch);
+		$httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+		curl_close($ch);
+		
+		if($httpCode !== 200) {
+			throw new WireException("Failed to start large file upload (HTTP {$httpCode}): {$response}");
+		}
+		
+		$startData = json_decode($response, true);
+		$fileId = $startData['fileId'];
+		
+		// 2. Upload chunks (10MB each)
+		$chunkSize = 10 * 1024 * 1024; // 10MB
+		$partNumber = 1;
+		$sha1Array = array();
+		$totalChunks = ceil($fileSize / $chunkSize);
+		
+		$this->message("Uploading {$totalChunks} chunks of 10MB each", Notice::log);
+		
+		$fp = fopen($pagefile->filename, 'rb');
+		if(!$fp) {
+			throw new WireException("Failed to open file for reading");
+		}
+		
+		try {
+			while(!feof($fp)) {
+				// Get upload part URL
+				$ch = curl_init("{$this->apiUrl}/b2api/v2/b2_get_upload_part_url");
+				curl_setopt($ch, CURLOPT_HTTPHEADER, array(
+					"Authorization: {$this->authToken}",
+					"Content-Type: application/json"
+				));
+				curl_setopt($ch, CURLOPT_POST, true);
+				curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode(array('fileId' => $fileId)));
+				curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+				curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+				
+				$response = curl_exec($ch);
+				$httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+				curl_close($ch);
+				
+				if($httpCode !== 200) {
+					throw new WireException("Failed to get upload part URL (HTTP {$httpCode})");
+				}
+				
+				$partData = json_decode($response, true);
+				
+				// Read chunk
+				$chunk = fread($fp, $chunkSize);
+				if($chunk === false) {
+					throw new WireException("Failed to read file chunk");
+				}
+				
+				if(strlen($chunk) === 0) break; // End of file
+				
+				$chunkSha1 = sha1($chunk);
+				$sha1Array[] = $chunkSha1;
+				
+				// Upload chunk
+				$ch = curl_init($partData['uploadUrl']);
+				curl_setopt($ch, CURLOPT_HTTPHEADER, array(
+					"Authorization: {$partData['authorizationToken']}",
+					"X-Bz-Part-Number: {$partNumber}",
+					"Content-Length: " . strlen($chunk),
+					"X-Bz-Content-Sha1: {$chunkSha1}"
+				));
+				curl_setopt($ch, CURLOPT_POST, true);
+				curl_setopt($ch, CURLOPT_POSTFIELDS, $chunk);
+				curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+				curl_setopt($ch, CURLOPT_TIMEOUT, 300);
+				
+				$response = curl_exec($ch);
+				$httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+				$curlError = curl_error($ch);
+				curl_close($ch);
+				
+				if($curlError) {
+					throw new WireException("Chunk upload cURL error: " . $curlError);
+				}
+				
+				if($httpCode !== 200) {
+					throw new WireException("Failed to upload chunk {$partNumber} (HTTP {$httpCode}): {$response}");
+				}
+				
+				$this->message("Uploaded chunk {$partNumber}/{$totalChunks}", Notice::log);
+				$partNumber++;
+			}
+		} finally {
+			fclose($fp);
+		}
+		
+		// 3. Finish large file upload
+		$this->message("Finalizing upload...", Notice::log);
+		
+		$ch = curl_init("{$this->apiUrl}/b2api/v2/b2_finish_large_file");
+		curl_setopt($ch, CURLOPT_HTTPHEADER, array(
+			"Authorization: {$this->authToken}",
+			"Content-Type: application/json"
+		));
+		curl_setopt($ch, CURLOPT_POST, true);
+		curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode(array(
+			'fileId' => $fileId,
+			'partSha1Array' => $sha1Array
+		)));
+		curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+		curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+		
+		$response = curl_exec($ch);
+		$httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+		curl_close($ch);
+		
+		if($httpCode !== 200) {
+			throw new WireException("Failed to finish large file upload (HTTP {$httpCode}): {$response}");
+		}
+		
+		$this->message("Successfully uploaded " . count($sha1Array) . " chunks", Notice::log);
+		
 		return json_decode($response, true);
 	}
 
