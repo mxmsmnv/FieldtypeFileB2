@@ -166,7 +166,7 @@ The module automatically chooses the best upload method:
 ```
 Standard Upload:
 1. Browser → Server (shows progress)
-2. Server → B2 in one request
+2. Server → B2 via streaming (no full-file memory load)
 3. Success!
 ```
 
@@ -180,13 +180,13 @@ Chunked Upload:
    - ... continues ...
    - Chunk 50/50 (10MB)
 3. B2 assembles file
-4. Success!
+4. Success! (or b2_cancel_large_file on any error)
 ```
 
 **Benefits of Chunked Upload:**
-- ✅ Lower memory usage (reads 10MB at a time)
+- ✅ Low memory usage — file is streamed, never loaded whole into RAM
 - ✅ More reliable for large files
-- ✅ Can retry individual chunks if they fail
+- ✅ Incomplete uploads are automatically cancelled on error (no orphaned files billed on B2)
 - ✅ Works around server limits
 
 ## Usage Examples
@@ -345,12 +345,12 @@ max_execution_time = 1800
 
 ### Memory exhausted error
 
-**Cause:** File too large for available PHP memory
+**Cause:** Conflict with other memory-intensive plugins
 
 **Solution:**
 1. Increase PHP memory_limit to 512MB
-2. Module uses chunked reading (10MB at time) so shouldn't happen
-3. If still occurs, check for other memory-intensive plugins
+2. Since v1.1 the module streams files — it never loads a full file into RAM for either standard or chunked uploads
+3. If error persists, check for other memory-intensive plugins running in the same request
 
 ## CORS Configuration
 
@@ -415,11 +415,12 @@ This will:
 
 ### B2 API Endpoints Used
 
-- `b2_authorize_account` - Authentication
+- `b2_authorize_account` - Authentication (cached 23 h in WireCache)
 - `b2_get_upload_url` - Standard uploads
 - `b2_start_large_file` - Start chunked upload
 - `b2_get_upload_part_url` - Get URL for each chunk
 - `b2_finish_large_file` - Complete chunked upload
+- `b2_cancel_large_file` - Cancel incomplete upload on error
 - `b2_list_file_names` - File listing (for delete)
 - `b2_delete_file_version` - Delete files
 
@@ -474,7 +475,7 @@ cp -r FieldtypeFileB2/* /site/modules/FieldtypeFileB2/
 # Modules → Refresh
 ```
 
-**Important:** Version 10+ requires updated Nginx/PHP settings for large files.
+**Important:** v1.1+ requires updated Nginx/PHP settings for large files.
 
 ## License
 
@@ -496,14 +497,15 @@ For issues and feature requests:
 
 See [CHANGELOG.md](CHANGELOG.md) for detailed version history.
 
-### Latest Changes (v1.0)
+### Latest Changes (v1.1.0)
 
-- ✅ Added chunked upload support for files ≥ 50MB
-- ✅ Tested with files up to 700MB
-- ✅ Improved logging for upload progress
-- ✅ Automatic method selection (standard vs chunked)
-- ✅ Better error handling and recovery
-- ✅ Comprehensive documentation for large files
+- ✅ `filesize` DB column upgraded to `BIGINT` — supports files ≥ 2 GB without overflow
+- ✅ Incomplete large-file uploads are now automatically cancelled on error (`b2_cancel_large_file`)
+- ✅ Streaming upload for standard files — no full-file memory load (`CURLOPT_INFILE` + `sha1_file()`)
+- ✅ Auth token cached in WireCache for 23 h — one API call per day instead of one per request
+- ✅ Correct B2 URL returned in AJAX response after upload
+- ✅ Removed duplicate `b2url` hook registration
+- ✅ `unlink` errors are now logged instead of silently suppressed
 
 ---
 

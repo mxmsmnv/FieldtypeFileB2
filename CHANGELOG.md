@@ -5,6 +5,27 @@ All notable changes to FieldtypeFileB2 will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-05-26
+
+### Fixed
+- **Critical**: `filesize` DB column changed from `INT` to `BIGINT` — prevents silent overflow for files ≥ 2 GB. Existing tables are auto-migrated on next `getDatabaseSchema()` call (Modules → Refresh).
+- **Critical**: Incomplete large-file uploads are now cancelled via `b2_cancel_large_file` when any chunk or finalisation step fails, preventing orphaned (and billed) uploads on B2.
+- **Serious**: Standard upload (`< 50 MB`) no longer reads the entire file into PHP memory with `file_get_contents`. It now streams the file with `CURLOPT_INFILE`; SHA1 is computed with `sha1_file()`. Eliminates memory spikes when many files are uploaded in parallel.
+- **Serious**: AJAX upload response now returns the correct B2/custom-domain URL instead of the local file URL (which no longer exists after `Pages::saved`).
+- **Serious**: Duplicate `Pagefile::b2url` hook registration removed — `hookB2Url` was being called twice per property access.
+- **Moderate**: `hookPageSaved` now uses `unlink()` without `@` suppression and logs an error if deletion fails instead of silently ignoring it.
+- **Moderate**: `hookPageSaved` exits early if the page has no fields, reducing unnecessary iteration.
+- **Moderate**: `generateB2UrlFast` / `hookB2Url` merged into a single unified method. Custom domain is respected in both admin rendering and the `->b2url` hook. Hardcoded region `005` replaced with region extracted from authenticated `apiUrl`.
+- **Moderate**: Page ID is now cast to `int` before being passed to `uploadFileToB2` and `deleteFileFromB2`.
+
+### Added
+- **Auth caching**: `authenticateB2()` now stores the B2 auth token in `WireCache` for 23 hours. Only one real `b2_authorize_account` API call is made per day, regardless of how many PHP requests load the module.
+- **`cancelLargeFileUpload()`**: new protected helper that calls `b2_cancel_large_file` in a best-effort, non-throwing way.
+
+### Changed
+- `FieldtypeFileB2` version aligned to `10` (was `001`) to match `InputfieldFileB2`.
+- `localStorage` config default changed from `1` (enabled) to `0` (disabled) — B2 uploading is now active out of the box for new installs.
+
 ## [1.0.0] - 2025-12-02
 
 ### 🎉 Major Release: Large File Support

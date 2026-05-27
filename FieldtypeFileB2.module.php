@@ -17,7 +17,7 @@ class FieldtypeFileB2 extends FieldtypeFile {
 			'title' => __('FieldtypeFileB2', __FILE__),
 			'summary' => __('One or more file uploads to Backblaze B2 (sortable)', __FILE__),
 			'author' => 'Maxim Alex',
-			'version' => 001,
+			'version' => 110, // 1.1.0
 			'permanent' => false,
 			'installs'  => 'InputfieldFileB2'
 			);
@@ -104,7 +104,7 @@ class FieldtypeFileB2 extends FieldtypeFile {
 
 		$schema['data'] = "varchar($maxLen) NOT NULL";
 		$schema['description'] = "text NOT NULL";
-		$schema['filesize'] = "int NOT NULL";
+		$schema['filesize'] = "bigint NOT NULL";
 		$schema['modified'] = "datetime";
 		$schema['created'] = "datetime";
 		$schema['keys']['description'] = 'FULLTEXT KEY description (description)';
@@ -159,6 +159,22 @@ class FieldtypeFileB2 extends FieldtypeFile {
 					$this->error("Error adding created/modified to '{$field->name}' schema", Notice::log);
 				}
 
+			}
+		}
+
+		// Migrate filesize column from INT to BIGINT if needed (supports files > 2GB)
+		if($field->id) {
+			try {
+				$query = $database->prepare("SHOW COLUMNS FROM `$table` WHERE Field='filesize'");
+				$query->execute();
+				$row = $query->fetch(\PDO::FETCH_ASSOC);
+				$query->closeCursor();
+				if($row && stripos($row['Type'], 'bigint') === false) {
+					$database->exec("ALTER TABLE `{$table}` MODIFY `filesize` bigint NOT NULL DEFAULT 0");
+					$this->message("Upgraded filesize column to BIGINT for '{$field->name}'", Notice::log);
+				}
+			} catch(\Exception $e) {
+				$this->error("Error upgrading filesize column for '{$field->name}': " . $e->getMessage(), Notice::log);
 			}
 		}
 

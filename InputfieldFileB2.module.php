@@ -27,7 +27,7 @@ class InputfieldFileB2 extends InputfieldFile implements Module {
 			'title' => __('InputfieldFileB2', __FILE__),
 			'summary' => __('One or more file uploads to Backblaze B2 (sortable)', __FILE__),
 			'author' => 'Maxim Alex',
-			'version' => 10,
+			'version' => 110, // 1.1.0
 			'autoload' => true
 		);
 	}
@@ -41,8 +41,7 @@ class InputfieldFileB2 extends InputfieldFile implements Module {
 			require_once($configFile);
 		}
 		
-		// Add hook for b2url property
-		$this->addHook('Pagefile::b2url', $this, 'hookB2Url');
+		// Add hook for b2url property (property access only — method call not needed)
 		$this->addHookProperty('Pagefile::b2url', $this, 'hookB2Url');
 		
 		// Add hook to delete local files after page save (only if not using localStorage)
@@ -136,7 +135,7 @@ class InputfieldFileB2 extends InputfieldFile implements Module {
 		$message = $this->_('Added file:') . " {$pagefile->basename}";
 
 		// Get page ID (works in both AJAX and non-AJAX modes)
-		$pageId = $this->input->get->id ? $this->input->get->id : ($pagefile->page ? $pagefile->page->id : 0);
+		$pageId = $this->input->get->id ? (int)$this->input->get->id : ($pagefile->page ? (int)$pagefile->page->id : 0);
 
 		// IMPORTANT: Set file size BEFORE uploading to B2 and deleting local file
 		$pagefile->fSize = @filesize($pagefile->filename);
@@ -158,7 +157,9 @@ class InputfieldFileB2 extends InputfieldFile implements Module {
 			if($n) $n--;
 			$this->currentItem = $pagefile;
 			$markup = $this->fileAddedGetMarkup($pagefile, $n);
-			$this->ajaxResponse(false, $message, $pagefile->url, $pagefile->fSize, $markup);
+			// Use B2 URL for AJAX response (local file will be deleted after page save)
+			$ajaxUrl = $this->localStorage ? $pagefile->url : $this->generateB2UrlFast($pagefile);
+			$this->ajaxResponse(false, $message, $ajaxUrl, $pagefile->fSize, $markup);
 		} else {
 			$this->message($message);
 		}
@@ -248,7 +249,7 @@ class InputfieldFileB2 extends InputfieldFile implements Module {
 		
 		if(!$this->localStorage) {
 			try {
-				$this->deleteFileFromB2($pagefile, $this->input->get->id);
+				$this->deleteFileFromB2($pagefile, (int)$this->input->get->id);
 			} catch(\Exception $e) {
 				$this->error("B2 Delete Error: " . $e->getMessage());
 			}
@@ -357,120 +358,100 @@ class InputfieldFileB2 extends InputfieldFile implements Module {
 	}
 
 	/**
-	 * Generate B2 URL quickly without API calls
-	 * Uses config values only - no authentication needed
-	 * 
+	 * Build the public B2 URL for a file.
+	 *
+	 * Supports custom domain and the standard friendly B2 URL format.
+	 * Calls authenticateB2() if the region is not yet known — the result
+	 * is cached in WireCache for 23 hours so subsequent calls are free.
+	 *
 	 * @param Pagefile $pagefile
-	 * @return string B2 URL
+	 * @return string
 	 */
 	protected function generateB2UrlFast($pagefile) {
-		// Extract region from apiUrl in config
-		$region = '005'; // default us-east
-		if($this->apiUrl && preg_match('/api(\d{3})\.backblazeb2\.com/', $this->apiUrl, $match)) {
-			$region = $match[1];
+		$ssl      = $this->useSSL ? 'https' : 'http';
+		$fileName = $pagefile->page->id . '/' . $pagefile->name;
+
+		// Custom domain takes priority
+		if($this->useCustomDomain && !empty($this->customDomain)) {
+			return "{$ssl}://{$this->customDomain}/{$fileName}";
 		}
-		
-		$fileName = $pagefile->page->id . "/" . $pagefile->name;
-		$ssl = ($this->useSSL) ? 'https' : 'http';
-		$url = "{$ssl}://f{$region}.backblazeb2.com/file/{$this->bucketName}/{$fileName}";
-		
-		return $url;
+
+		// Ensure we know the region (uses cached auth — almost always free)
+		if(!$this->apiUrl) {
+			try {
+				$this->authenticateB2();
+			} catch(\Exception $e) {
+				// Fallback: best-effort URL with default region
+				return "{$ssl}://f005.backblazeb2.com/file/{$this->bucketName}/{$fileName}";
+			}
+		}
+
+		$region = '005'; // fallback
+		if(preg_match('/api(\d{3})\.backblazeb2\.com/', $this->apiUrl, $m)) {
+			$region = $m[1];
+		}
+
+		return "{$ssl}://f{$region}.backblazeb2.com/file/{$this->bucketName}/{$fileName}";
 	}
 
 	/**
-	 * Hook method to return B2 URL for a file
+	 * Hook: return B2 URL for $pagefile->b2url property access.
 	 *
 	 * @param HookEvent $event
 	 */
 	protected function hookB2Url($event) {
+		$pagefile = $event->object;
+
 		if($this->localStorage) {
-			$event->return = $event->object->url;
+			$event->return = $pagefile->url;
 			return;
 		}
 
-		$pagefile = $event->object;
-		$ssl = ($this->useSSL) ? 'https' : 'http';
-		
-		// Use custom domain if configured
-		if($this->useCustomDomain && !empty($this->customDomain)) {
-			$fileName = $pagefile->page->id . "/" . $pagefile->name;
-			$event->return = "{$ssl}://{$this->customDomain}/{$fileName}";
-			return;
-		}
-		
-		// Otherwise use B2 Friendly URL
-		// Extract region from downloadUrl or use default
-		if(!$this->downloadUrl) {
-			try {
-				$this->authenticateB2();
-			} catch(\Exception $e) {
-				$this->error("Cannot get B2 URL: " . $e->getMessage());
-				$event->return = $pagefile->url;
-				return;
-			}
-		}
-		
-		
-		// Convert Native URL to Friendly URL
-		// Native: https://fe2e1bbf8df6f.backblazeb2.com
-		// Friendly: https://f005.backblazeb2.com
-		
-		$fileName = $pagefile->page->id . "/" . $pagefile->name;
-		
-		// Extract region from downloadUrl
-		// Example: https://fe2e1bbf8df6f.backblazeb2.com or https://f005.backblazeb2.com
-		if(preg_match('/https?:\/\/([^.]+)\.backblazeb2\.com/', $this->downloadUrl, $matches)) {
-			$endpoint = $matches[1];
-			
-			// If it's account ID format (starts with 'f' followed by account ID hash)
-			// Convert to friendly format: f + region code
-			if(preg_match('/^f[0-9a-f]{12,}$/i', $endpoint)) {
-				// This is the account ID format, we need to convert it
-				// Try to extract region from apiUrl instead
-				if(preg_match('/api(\d{3})\.backblazeb2\.com/', $this->apiUrl, $regionMatch)) {
-					$region = $regionMatch[1];
-					$friendlyEndpoint = "f{$region}";
-					$event->return = "{$ssl}://{$friendlyEndpoint}.backblazeb2.com/file/{$this->bucketName}/{$fileName}";
-					return;
-				}
-			}
-		}
-		
-		// Fallback to original downloadUrl format
-		$event->return = "{$this->downloadUrl}/file/{$this->bucketName}/{$fileName}";
+		$event->return = $this->generateB2UrlFast($pagefile);
 	}
 
 	/**
-	 * Authenticate with Backblaze B2 API
-	 * 
-	 * Uses HTTP Basic Auth with base64 encoded keyId:applicationKey
-	 * Returns authorization token and API URLs
+	 * Authenticate with Backblaze B2 API.
+	 *
+	 * Uses HTTP Basic Auth (keyId:applicationKey, base64-encoded).
+	 * The result is cached in WireCache for 23 hours so only one real
+	 * API call is made per day across all PHP requests.
 	 *
 	 * @throws WireException on authentication failure
 	 */
 	protected function authenticateB2() {
-		// Skip if already authenticated
-		if($this->authToken && $this->apiUrl) {
-			return;
-		}
+		// Already authenticated in this request
+		if($this->authToken && $this->apiUrl) return;
 
 		// Validate credentials exist
 		if(empty($this->b2KeyId) || empty($this->b2ApplicationKey)) {
 			throw new WireException("B2 credentials not configured");
 		}
 
-		// Create Basic Auth header
+		// Try to restore from WireCache — tokens are valid 24 h, we cache for 23 h
+		$cache    = $this->wire('cache');
+		$cacheKey = 'InputfieldFileB2_auth_' . md5($this->b2KeyId);
+		if($cache) {
+			$cached = $cache->get($cacheKey);
+			if($cached && isset($cached['authorizationToken'])) {
+				$this->authToken   = $cached['authorizationToken'];
+				$this->apiUrl      = $cached['apiUrl'];
+				$this->downloadUrl = $cached['downloadUrl'];
+				$this->b2AccountId = $cached['accountId'];
+				return;
+			}
+		}
+
+		// Real API call
 		$authString = base64_encode("{$this->b2KeyId}:{$this->b2ApplicationKey}");
-		
+
 		$ch = curl_init('https://api.backblazeb2.com/b2api/v2/b2_authorize_account');
-		curl_setopt($ch, CURLOPT_HTTPHEADER, array(
-			"Authorization: Basic {$authString}"
-		));
+		curl_setopt($ch, CURLOPT_HTTPHEADER, array("Authorization: Basic {$authString}"));
 		curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
 		curl_setopt($ch, CURLOPT_TIMEOUT, 30);
-		
-		$response = curl_exec($ch);
-		$httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+
+		$response  = curl_exec($ch);
+		$httpCode  = curl_getinfo($ch, CURLINFO_HTTP_CODE);
 		$curlError = curl_error($ch);
 		curl_close($ch);
 
@@ -479,27 +460,32 @@ class InputfieldFileB2 extends InputfieldFile implements Module {
 		}
 
 		if($httpCode !== 200) {
-			$errorMsg = "B2 Authentication failed (HTTP {$httpCode})";
-			if($response) {
-				$errorData = json_decode($response, true);
-				if(isset($errorData['message'])) {
-					$errorMsg .= ": " . $errorData['message'];
-				}
-			}
+			$errorMsg  = "B2 Authentication failed (HTTP {$httpCode})";
+			$errorData = json_decode($response, true);
+			if(isset($errorData['message'])) $errorMsg .= ": " . $errorData['message'];
 			throw new WireException($errorMsg);
 		}
 
 		$data = json_decode($response, true);
-		
+
 		if(!isset($data['authorizationToken']) || !isset($data['apiUrl'])) {
 			throw new WireException("B2 Authentication response missing required fields");
 		}
 
-		// Store authentication data
-		$this->authToken = $data['authorizationToken'];
-		$this->apiUrl = $data['apiUrl'];
+		$this->authToken   = $data['authorizationToken'];
+		$this->apiUrl      = $data['apiUrl'];
 		$this->downloadUrl = $data['downloadUrl'];
 		$this->b2AccountId = $data['accountId'];
+
+		// Persist to WireCache for 23 hours
+		if($cache) {
+			$cache->save($cacheKey, array(
+				'authorizationToken' => $this->authToken,
+				'apiUrl'             => $this->apiUrl,
+				'downloadUrl'        => $this->downloadUrl,
+				'accountId'          => $this->b2AccountId,
+			), 23 * 3600);
+		}
 	}
 
 	/**
@@ -580,64 +566,67 @@ class InputfieldFileB2 extends InputfieldFile implements Module {
 	}
 	
 	/**
-	 * Standard B2 upload for files < 100MB
+	 * Standard B2 upload for files < 50 MB.
+	 *
+	 * Uses streaming via CURLOPT_INFILE so the file is never loaded
+	 * into PHP memory. SHA1 is computed separately with sha1_file().
 	 */
 	protected function uploadStandardFileToB2($pagefile, $pageID) {
-		// Get upload URL and token
-		$uploadData = $this->getUploadUrl();
-		
-		// Read file content
-		$fileContent = file_get_contents($pagefile->filename);
-		if($fileContent === false) {
-			throw new WireException("Failed to read file: {$pagefile->filename}");
-		}
-		
-		// Prepare file metadata
-		$fileName = "{$pageID}/{$pagefile->name}";
-		$sha1 = sha1($fileContent);
-		$contentType = mime_content_type($pagefile->filename);
-		if(!$contentType) $contentType = 'application/octet-stream';
-		
-		// Build headers
+		$uploadData  = $this->getUploadUrl();
+		$fileSize    = filesize($pagefile->filename);
+		$fileName    = "{$pageID}/{$pagefile->name}";
+		// sha1_file() reads sequentially — no full-file memory load
+		$sha1        = sha1_file($pagefile->filename);
+		$contentType = mime_content_type($pagefile->filename) ?: 'application/octet-stream';
+
 		$headers = array(
 			"Authorization: {$uploadData['authorizationToken']}",
 			"X-Bz-File-Name: " . rawurlencode($fileName),
 			"Content-Type: {$contentType}",
+			"Content-Length: {$fileSize}",
 			"X-Bz-Content-Sha1: {$sha1}",
-			"X-Bz-Info-src_last_modified_millis: " . (filemtime($pagefile->filename) * 1000)
+			"X-Bz-Info-src_last_modified_millis: " . (filemtime($pagefile->filename) * 1000),
 		);
-		
-		// Add cache control if configured
+
 		if(!empty($this->cacheControl) && $this->cacheControl > 0) {
 			$headers[] = "X-Bz-Info-b2-cache-control: max-age={$this->cacheControl}";
 		}
 
-		// Upload file
-		$ch = curl_init($uploadData['uploadUrl']);
-		curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
-		curl_setopt($ch, CURLOPT_POST, true);
-		curl_setopt($ch, CURLOPT_POSTFIELDS, $fileContent);
-		curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-		curl_setopt($ch, CURLOPT_TIMEOUT, 300);
-		
-		$response = curl_exec($ch);
-		$httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-		$curlError = curl_error($ch);
-		curl_close($ch);
+		$fp = fopen($pagefile->filename, 'rb');
+		if(!$fp) throw new WireException("Failed to open file for reading: {$pagefile->filename}");
 
-		if($curlError) {
-			throw new WireException("B2 Upload cURL error: " . $curlError);
+		$response  = null;
+		$httpCode  = 0;
+		$curlError = '';
+
+		try {
+			$ch = curl_init($uploadData['uploadUrl']);
+			// Use PUT + CURLOPT_INFILE for streaming; override method to POST
+			curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+			curl_setopt($ch, CURLOPT_PUT, true);
+			curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'POST');
+			curl_setopt($ch, CURLOPT_INFILE, $fp);
+			curl_setopt($ch, CURLOPT_INFILESIZE, $fileSize);
+			curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+			curl_setopt($ch, CURLOPT_TIMEOUT, 300);
+
+			$response  = curl_exec($ch);
+			$httpCode  = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+			$curlError = curl_error($ch);
+			curl_close($ch);
+		} finally {
+			fclose($fp);
 		}
 
+		if($curlError) throw new WireException("B2 Upload cURL error: " . $curlError);
+
 		if($httpCode !== 200) {
-			$errorMsg = "B2 Upload failed (HTTP {$httpCode})";
-			if($response) {
-				$errorData = json_decode($response, true);
-				if(isset($errorData['message'])) {
-					$errorMsg .= ": " . $errorData['message'];
-				} else {
-					$errorMsg .= ": " . $response;
-				}
+			$errorMsg  = "B2 Upload failed (HTTP {$httpCode})";
+			$errorData = json_decode($response, true);
+			if(isset($errorData['message'])) {
+				$errorMsg .= ": " . $errorData['message'];
+			} else {
+				$errorMsg .= ": " . $response;
 			}
 			throw new WireException($errorMsg);
 		}
@@ -699,10 +688,8 @@ class InputfieldFileB2 extends InputfieldFile implements Module {
 		$this->message("Uploading {$totalChunks} chunks of 10MB each", Notice::log);
 		
 		$fp = fopen($pagefile->filename, 'rb');
-		if(!$fp) {
-			throw new WireException("Failed to open file for reading");
-		}
-		
+		if(!$fp) throw new WireException("Failed to open file for reading");
+
 		try {
 			while(!feof($fp)) {
 				// Get upload part URL
@@ -715,28 +702,25 @@ class InputfieldFileB2 extends InputfieldFile implements Module {
 				curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode(array('fileId' => $fileId)));
 				curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
 				curl_setopt($ch, CURLOPT_TIMEOUT, 30);
-				
+
 				$response = curl_exec($ch);
 				$httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
 				curl_close($ch);
-				
+
 				if($httpCode !== 200) {
 					throw new WireException("Failed to get upload part URL (HTTP {$httpCode})");
 				}
-				
+
 				$partData = json_decode($response, true);
-				
+
 				// Read chunk
 				$chunk = fread($fp, $chunkSize);
-				if($chunk === false) {
-					throw new WireException("Failed to read file chunk");
-				}
-				
+				if($chunk === false) throw new WireException("Failed to read file chunk");
 				if(strlen($chunk) === 0) break; // End of file
-				
-				$chunkSha1 = sha1($chunk);
+
+				$chunkSha1  = sha1($chunk);
 				$sha1Array[] = $chunkSha1;
-				
+
 				// Upload chunk
 				$ch = curl_init($partData['uploadUrl']);
 				curl_setopt($ch, CURLOPT_HTTPHEADER, array(
@@ -749,30 +733,36 @@ class InputfieldFileB2 extends InputfieldFile implements Module {
 				curl_setopt($ch, CURLOPT_POSTFIELDS, $chunk);
 				curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
 				curl_setopt($ch, CURLOPT_TIMEOUT, 300);
-				
-				$response = curl_exec($ch);
-				$httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+
+				$response  = curl_exec($ch);
+				$httpCode  = curl_getinfo($ch, CURLINFO_HTTP_CODE);
 				$curlError = curl_error($ch);
 				curl_close($ch);
-				
-				if($curlError) {
-					throw new WireException("Chunk upload cURL error: " . $curlError);
-				}
-				
+
+				if($curlError) throw new WireException("Chunk upload cURL error: " . $curlError);
+
 				if($httpCode !== 200) {
 					throw new WireException("Failed to upload chunk {$partNumber} (HTTP {$httpCode}): {$response}");
 				}
-				
+
 				$this->message("Uploaded chunk {$partNumber}/{$totalChunks}", Notice::log);
 				$partNumber++;
 			}
-		} finally {
+
 			fclose($fp);
+			$fp = null;
+
+		} catch(\Exception $e) {
+			// Close file handle
+			if($fp) { fclose($fp); $fp = null; }
+			// Cancel the incomplete large file to avoid orphaned uploads on B2
+			$this->cancelLargeFileUpload($fileId);
+			throw $e;
 		}
-		
+
 		// 3. Finish large file upload
 		$this->message("Finalizing upload...", Notice::log);
-		
+
 		$ch = curl_init("{$this->apiUrl}/b2api/v2/b2_finish_large_file");
 		curl_setopt($ch, CURLOPT_HTTPHEADER, array(
 			"Authorization: {$this->authToken}",
@@ -780,23 +770,48 @@ class InputfieldFileB2 extends InputfieldFile implements Module {
 		));
 		curl_setopt($ch, CURLOPT_POST, true);
 		curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode(array(
-			'fileId' => $fileId,
+			'fileId'        => $fileId,
 			'partSha1Array' => $sha1Array
 		)));
 		curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
 		curl_setopt($ch, CURLOPT_TIMEOUT, 30);
-		
+
 		$response = curl_exec($ch);
 		$httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
 		curl_close($ch);
-		
+
 		if($httpCode !== 200) {
+			$this->cancelLargeFileUpload($fileId);
 			throw new WireException("Failed to finish large file upload (HTTP {$httpCode}): {$response}");
 		}
-		
+
 		$this->message("Successfully uploaded " . count($sha1Array) . " chunks", Notice::log);
-		
+
 		return json_decode($response, true);
+	}
+
+	/**
+	 * Cancel an incomplete B2 large file upload (best-effort, never throws).
+	 *
+	 * @param string $fileId
+	 */
+	protected function cancelLargeFileUpload($fileId) {
+		try {
+			$ch = curl_init("{$this->apiUrl}/b2api/v2/b2_cancel_large_file");
+			curl_setopt($ch, CURLOPT_HTTPHEADER, array(
+				"Authorization: {$this->authToken}",
+				"Content-Type: application/json"
+			));
+			curl_setopt($ch, CURLOPT_POST, true);
+			curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode(array('fileId' => $fileId)));
+			curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+			curl_setopt($ch, CURLOPT_TIMEOUT, 15);
+			curl_exec($ch);
+			curl_close($ch);
+			$this->message("Cancelled incomplete large file upload (fileId: {$fileId})", Notice::log);
+		} catch(\Exception $e) {
+			// Ignore — best effort only
+		}
 	}
 
 	/**
@@ -879,33 +894,35 @@ class InputfieldFileB2 extends InputfieldFile implements Module {
 	
 	
 	/**
-	 * Hook called after page is saved
-	 * Delete local files that were uploaded to B2
+	 * Hook: delete local copies of files after the page is saved.
+	 *
+	 * Files are uploaded to B2 during ___fileAdded(), but the local copy
+	 * is only safe to remove once the page (and thus DB record) is saved.
 	 *
 	 * @param HookEvent $event
 	 */
 	public function hookPageSaved($event) {
+		// Nothing to do when using local storage
+		if($this->localStorage) return;
+
 		$page = $event->arguments(0);
-		
-		// Only process if not using localStorage
-		if($this->localStorage) {
-			return;
-		}
-		
-		
-		// Find all fields of type FieldtypeFileB2
+
+		// Skip pages that have no fields at all
+		if(!$page->fields || !count($page->fields)) return;
+
 		foreach($page->fields as $field) {
-			if($field->type instanceof FieldtypeFileB2) {
-				$pagefiles = $page->get($field->name);
-				
-				if($pagefiles && count($pagefiles)) {
-					
-					foreach($pagefiles as $pagefile) {
-						// Check if file exists locally
-						if(file_exists($pagefile->filename)) {
-							@unlink($pagefile->filename);
-						}
-					}
+			if(!($field->type instanceof FieldtypeFileB2)) continue;
+
+			$pagefiles = $page->get($field->name);
+			if(!$pagefiles || !count($pagefiles)) continue;
+
+			foreach($pagefiles as $pagefile) {
+				if(!file_exists($pagefile->filename)) continue;
+				if(!unlink($pagefile->filename)) {
+					$this->error(
+						"Could not delete local file after B2 upload: {$pagefile->filename}",
+						Notice::log
+					);
 				}
 			}
 		}

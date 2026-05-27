@@ -107,11 +107,11 @@ class InputfieldFileB2Config extends ModuleConfig {
 				'label' => $this->_('Store files locally'),
 				'description' => $this->_('If checked, files will be stored locally instead of Backblaze B2.'),
 				'notes' => $this->_(
-					'This option only changes the url of the files from B2 to local and disables local file deletion.
+					'Enable only for development or testing. When unchecked (default), files are uploaded to B2 and the local copy is deleted after save.
 					For files already on B2 you\'d have to transfer them yourself.'
 				),
 				'columnWidth' => 50,
-				'value' => $this->_('1'),
+				'value' => 0,
 			),
             
             // Cache Control
