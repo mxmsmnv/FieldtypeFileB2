@@ -16,7 +16,8 @@ class FieldtypeFileB2 extends FieldtypeFile {
 		return array(
 			'title' => __('FieldtypeFileB2', __FILE__),
 			'summary' => __('One or more file uploads to Backblaze B2 (sortable)', __FILE__),
-			'author' => 'Maxim Alex',
+			'author' => 'Maxim Semenov',
+			'href'     => 'https://smnv.org',
 			'version' => 110, // 1.1.0
 			'permanent' => false,
 			'installs'  => 'InputfieldFileB2'

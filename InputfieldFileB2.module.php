@@ -26,7 +26,8 @@ class InputfieldFileB2 extends InputfieldFile implements Module {
 		return array(
 			'title' => __('InputfieldFileB2', __FILE__),
 			'summary' => __('One or more file uploads to Backblaze B2 (sortable)', __FILE__),
-			'author' => 'Maxim Alex',
+			'author' => 'Maxim Semenov',
+			'href'     => 'https://smnv.org',
 			'version' => 110, // 1.1.0
 			'autoload' => true
 		);
