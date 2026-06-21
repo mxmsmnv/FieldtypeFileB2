@@ -2,6 +2,8 @@
 
 Store and serve files directly from Backblaze B2 Cloud Storage in ProcessWire. **Now supports files up to 700MB** with automatic chunked uploads.
 
+![FieldtypeFileB2](assets/FieldtypeFileB2.png)
+
 **Author:** Maxim Semenov  
 **Website:** [smnv.org](https://smnv.org)  
 **Email:** [maxim@smnv.org](mailto:maxim@smnv.org)
